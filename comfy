@@ -1,3 +1,621 @@
+import re
+import sys
+import requests
+
+
+class CPTCoder:
+
+    def parse_med_times_file(self, filepath):
+        medications = []
+        with open(filepath, 'r') as f:
+            lines = f.readlines()
+
+        data_started = False
+        for line in lines:
+            line = line.rstrip()
+            if not line.strip():
+                continue
+            if 'MEDICATION' in line and 'TYPE' in line and 'START' in line:
+                continue
+            if line.strip().startswith('---'):
+                data_started = True
+                continue
+            if not data_started:
+                continue
+            if len(line) < 40:
+                continue
+
+            medication = line[0:45].strip()
+            med_type   = line[45:70].strip() if len(line) > 45 else ''
+            start      = line[70:80].strip() if len(line) > 70 else ''
+            stop       = line[80:90].strip() if len(line) > 80 else ''
+            duration   = line[90:].strip()   if len(line) > 90 else ''
+
+            if medication:
+                medications.append({
+                    'medication': medication,
+                    'type':       med_type,
+                    'start':      start,
+                    'stop':       stop,
+                    'duration':   duration,
+                })
+        return medications
+
+    def parse_duration_to_minutes(self, duration_str):
+        if not duration_str or duration_str.strip() == '':
+            return 0
+        duration_str = duration_str.strip().lower()
+        hours, minutes = 0, 0
+        hour_match = re.search(r'(\d+)\s*h', duration_str)
+        if hour_match:
+            hours = int(hour_match.group(1))
+        min_match = re.search(r'(\d+)\s*m', duration_str)
+        if min_match:
+            minutes = int(min_match.group(1))
+        return (hours * 60) + minutes
+
+    def time_to_minutes(self, time_str):
+        if not time_str or time_str.strip() == '':
+            return None
+        try:
+            parts = time_str.strip().split(':')
+            return int(parts[0]) * 60 + int(parts[1])
+        except Exception:
+            return None
+
+    def extract_drug_name(self, medication_str):
+        cleaned = re.sub(r'[\d.]+\s*(mg|ml|mcg|g|units?|%)\b', '', medication_str, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\b(vial|inj|injection|syringe|bag|bottle|soln|solution)\b', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'[/]', ' ', cleaned)
+        cleaned = cleaned.strip()
+        parts = cleaned.split()
+        if parts:
+            return parts[0].lower().strip()
+        return medication_str.lower().strip()
+
+    def classify_medication(self, med_entry):
+        med_name      = med_entry.get('medication', '').lower()
+        med_type      = med_entry.get('type', '').strip().upper()
+        stop_time     = med_entry.get('stop', '').strip()
+        duration_mins = self.parse_duration_to_minutes(med_entry.get('duration', ''))
+
+        # PRIORITY 1: IM or SubQ
+        if med_type in ['IM', 'SUBQ']:
+            return 'IM_SUBQ'
+
+        # PRIORITY 2: Hydration fluids
+        is_hydration_type = 'FLUID' in med_type or 'HYDRATION' in med_type
+        is_hydration_name = any(fluid in med_name for fluid in [
+            'normal saline', 'saline', 'ns',
+            'lactated ringer', 'ringer', 'lr',
+            'd5w', 'dextrose', 'd5',
+            'sterile water', 'sodium chloride',
+            'potassium', 'nacl',
+        ])
+        if is_hydration_type or is_hydration_name:
+            if not stop_time or duration_mins < 31:
+                return 'NOT_BILLABLE'
+            return 'HYDRATION'
+
+        # PRIORITY 3: Infusion (>16 min with stop time)
+        if stop_time and duration_mins > 16:
+            return 'INFUSION'
+
+        # PRIORITY 4: IV Push
+        return 'PUSH'
+
+    def check_time_overlap(self, med1, med2):
+        start1 = self.time_to_minutes(med1.get('start', ''))
+        stop1  = self.time_to_minutes(med1.get('stop', ''))
+        start2 = self.time_to_minutes(med2.get('start', ''))
+        stop2  = self.time_to_minutes(med2.get('stop', ''))
+
+        if any(v is None for v in [start1, stop1, start2, stop2]):
+            return 'none'
+        if start1 >= start2 and stop1 <= stop2:
+            return 'full'
+        if start2 >= start1 and stop2 <= stop1:
+            return 'full'
+        if start1 < stop2 and start2 < stop1:
+            return 'partial'
+        return 'none'
+
+    def determine_hydration_billing(self, hydration_meds, infusion_meds):
+        billable_hydration = []
+        skipped_hydration  = []
+
+        if not infusion_meds:
+            return hydration_meds, []
+
+        for h_med in hydration_meds:
+            h_start = self.time_to_minutes(h_med.get('start', ''))
+            h_stop  = self.time_to_minutes(h_med.get('stop', ''))
+
+            if h_start is None or h_stop is None:
+                skipped_hydration.append({
+                    'med':    h_med,
+                    'reason': f'Invalid time (start={h_med.get("start")}, stop={h_med.get("stop")})',
+                })
+                continue
+
+            max_overlap      = 'none'
+            overlapping_drug = None
+
+            for i_med in infusion_meds:
+                overlap = self.check_time_overlap(h_med, i_med)
+                if overlap == 'full':
+                    max_overlap      = 'full'
+                    overlapping_drug = i_med['medication']
+                    break
+                elif overlap == 'partial' and max_overlap != 'full':
+                    max_overlap      = 'partial'
+                    overlapping_drug = i_med['medication']
+
+            if max_overlap == 'full':
+                skipped_hydration.append({
+                    'med':    h_med,
+                    'reason': f'Carrier fluid (overlaps with {overlapping_drug})',
+                })
+            elif max_overlap == 'partial':
+                for i_med in infusion_meds:
+                    i_start = self.time_to_minutes(i_med.get('start', ''))
+                    i_stop  = self.time_to_minutes(i_med.get('stop', ''))
+                    if i_start is not None and i_stop is not None:
+                        if h_start < i_start:
+                            independent_mins = i_start - h_start
+                        elif h_stop > i_stop:
+                            independent_mins = h_stop - i_stop
+                        else:
+                            independent_mins = 0
+
+                        if independent_mins >= 31:
+                            modified_med = h_med.copy()
+                            modified_med['duration'] = f'{independent_mins}m'
+                            billable_hydration.append(modified_med)
+                        else:
+                            skipped_hydration.append({
+                                'med':    h_med,
+                                'reason': f'Independent time < 31 mins ({independent_mins}m)',
+                            })
+                        break
+            else:
+                billable_hydration.append(h_med)
+
+        return billable_hydration, skipped_hydration
+
+    def assign_cpt_codes(self, medications):
+        hydration_meds = []
+        infusion_meds  = []
+        push_meds      = []
+        im_subq_meds   = []
+        not_billable   = []
+
+        for med in medications:
+            med_type = self.classify_medication(med)
+            med['type_classified'] = med_type
+
+            if med_type == 'HYDRATION':
+                hydration_meds.append(med)
+            elif med_type == 'INFUSION':
+                infusion_meds.append(med)
+            elif med_type == 'IM_SUBQ':
+                im_subq_meds.append(med)
+            elif med_type == 'NOT_BILLABLE':
+                not_billable.append({'med': med, 'reason': 'Hydration without stop time or < 31 mins'})
+            else:
+                push_meds.append(med)
+
+        billable_hydration, skipped_hydration = self.determine_hydration_billing(
+            hydration_meds, infusion_meds
+        )
+
+        all_skipped  = not_billable + skipped_hydration
+        skipped_info = []
+
+        if all_skipped:
+            print("\nSKIPPED (Not Billable):")
+            print("-" * 70)
+            for item in all_skipped:
+                med    = item['med']
+                reason = item['reason']
+                info   = f"{med['medication']} - {reason}"
+                print(f"  {info}")
+                skipped_info.append(info)
+
+        codes = []
+        if im_subq_meds:
+            codes.extend(self._process_im_subq(im_subq_meds))
+
+        if infusion_meds:
+            codes.extend(self._process_with_infusion(infusion_meds, billable_hydration, push_meds))
+        else:
+            codes.extend(self._process_without_infusion(billable_hydration, push_meds))
+
+        return codes, skipped_info
+
+    def _process_im_subq(self, im_subq_meds):
+        codes = []
+        for idx, med in enumerate(im_subq_meds):
+            code = '96372' if idx == 0 else '96372-59'
+            desc = 'IM/SubQ Injection (Initial)' if idx == 0 else 'IM/SubQ Injection (Additional)'
+            codes.append(self._make_entry(med, code, desc, 1))
+        return codes
+
+    def _process_with_infusion(self, infusion_meds, hydration_meds, push_meds):
+        codes = []
+        processed_infusion_drugs = set()
+
+        for idx, med in enumerate(infusion_meds):
+            drug_name = self.extract_drug_name(med['medication'])
+            if idx == 0:
+                codes.append(self._make_entry(med, '96365', 'IV Infusion Initial', 1))
+                processed_infusion_drugs.add(drug_name)
+            else:
+                if drug_name in processed_infusion_drugs:
+                    codes.append(self._make_entry(med, '96366', 'Infusion Sequential - Same Drug', 1))
+                else:
+                    codes.append(self._make_entry(med, '96367', 'Infusion Sequential - Different Drug', 1))
+                    processed_infusion_drugs.add(drug_name)
+
+        # ✅ FIX 1: 96360 pehle, 96361 baad mein
+        hydration_initial_used = False
+        for med in hydration_meds:
+            duration_mins = self.parse_duration_to_minutes(med.get('duration', ''))
+            if duration_mins < 31:
+                continue
+            if not hydration_initial_used:
+                codes.append(self._make_entry(med, '96360', 'Hydration Initial (Infusion present)', 1))
+                hydration_initial_used = True
+                if duration_mins > 60:
+                    # ✅ FIX 2: Sahi multiplier calculation
+                    additional_units = (duration_mins - 60 + 29) // 30
+                    codes.append(self._make_entry(med, '96361', 'Hydration Additional', additional_units))
+            else:
+                # ✅ FIX 2: Sahi multiplier calculation
+                if duration_mins <= 60:
+                    units = 1
+                else:
+                    units = 1 + ((duration_mins - 60 + 29) // 30)
+                codes.append(self._make_entry(med, '96361', 'Hydration Sequential', units))
+
+        # Original push logic - bilkul same
+        push_seen_drugs = set()
+        for med in push_meds:
+            drug_name = self.extract_drug_name(med['medication'])
+            if drug_name in push_seen_drugs:
+                codes.append(self._make_entry(med, '96376', 'IV Push Same Drug', 1))
+            else:
+                codes.append(self._make_entry(med, '96375', 'IV Push New/Different Drug', 1))
+                push_seen_drugs.add(drug_name)
+
+        return codes
+
+    def _process_without_infusion(self, hydration_meds, push_meds):
+        codes = []
+
+        hydration_initial_used = False
+        for med in hydration_meds:
+            duration_mins = self.parse_duration_to_minutes(med.get('duration', ''))
+            if duration_mins < 31:
+                continue
+            if not hydration_initial_used:
+                codes.append(self._make_entry(med, '96360', 'Hydration Initial', 1))
+                hydration_initial_used = True
+                if duration_mins > 60:
+                    # ✅ FIX 2: Sahi multiplier calculation
+                    additional_units = (duration_mins - 60 + 29) // 30
+                    codes.append(self._make_entry(med, '96361', 'Hydration Additional', additional_units))
+            else:
+                # ✅ FIX 2: Sahi multiplier calculation
+                if duration_mins <= 60:
+                    units = 1
+                else:
+                    units = 1 + ((duration_mins - 60 + 29) // 30)
+                codes.append(self._make_entry(med, '96361', 'Hydration Sequential', units))
+
+        push_initial_used = False
+        push_seen_drugs   = set()
+        for med in push_meds:
+            drug_name = self.extract_drug_name(med['medication'])
+            if not push_initial_used:
+                codes.append(self._make_entry(med, '96374', 'IV Push Initial', 1))
+                push_initial_used = True
+                push_seen_drugs.add(drug_name)
+            else:
+                if drug_name in push_seen_drugs:
+                    codes.append(self._make_entry(med, '96376', 'IV Push Same Drug', 1))
+                else:
+                    codes.append(self._make_entry(med, '96375', 'IV Push New/Different Drug', 1))
+                    push_seen_drugs.add(drug_name)
+
+        return codes
+
+    def _make_entry(self, med, code, description, units):
+        return {
+            'medication':  med['medication'],
+            'start':       med.get('start', ''),
+            'stop':        med.get('stop', ''),
+            'duration':    med.get('duration', ''),
+            'code':        code,
+            'description': description,
+            'units':       units,
+        }
+
+
+# ── LLM verify ────────────────────────────────────────────────────────────────
+def llm_verify(medications, cpt_results, skipped_info):
+    """LLM is PRIMARY - its corrected codes are the final output"""
+
+    med_table = "MEDICATIONS ADMINISTERED:\n"
+    med_table += "-" * 100 + "\n"
+    for idx, med in enumerate(medications, 1):
+        med_table += f"{idx}. {med['medication']}\n"
+        med_table += f"   Route: {med['type']}\n"
+        med_table += f"   Time: {med['start']}"
+        if med.get('stop'):
+            med_table += f" -> {med['stop']} (Duration: {med.get('duration', 'N/A')})"
+        med_table += "\n\n"
+
+    cpt_table = "RULE-BASED ASSIGNED CPT CODES (for reference only):\n"
+    cpt_table += "-" * 100 + "\n"
+    for r in cpt_results:
+        cpt_table += f"- {r['code']} - {r['medication']}\n"
+        cpt_table += f"  {r['description']}\n\n"
+
+    code_summary = {}
+    for r in cpt_results:
+        code_summary[r['code']] = code_summary.get(r['code'], 0) + r['units']
+
+    summary = "RULE-BASED BILLING SUMMARY (for reference only):\n"
+    summary += "-" * 50 + "\n"
+    for code, units in sorted(code_summary.items()):
+        summary += f"{code} x {units} units\n" if units > 1 else f"{code}\n"
+
+    skipped_text = ""
+    if skipped_info:
+        skipped_text = "\nSKIPPED (Not Billable):\n" + "-" * 50 + "\n"
+        for item in skipped_info:
+            skipped_text += f"- {item}\n"
+
+    prompt = f"""You are a medical billing specialist. Assign final CPT codes for these injectable medications.
+
+{med_table}
+{skipped_text}
+Rule-based suggestion (reference only):
+{summary}
+
+CPT RULES WITH EXAMPLES:
+
+1. IM/SubQ Injections:
+   - 96372 = first IM/SubQ injection
+   - 96372-59 = each additional IM/SubQ injection
+   Example: Toradol IM + Decadron IM = 96372, 96372-59
+
+2. IV Infusion (drug >16 min with stop time):
+   - 96365 = FIRST/INITIAL infusion drug (only ONE per encounter)
+   - 96367 = SEQUENTIAL infusion, DIFFERENT drug after initial
+   - 96366 = SEQUENTIAL infusion, SAME drug as one already running
+   - 96368 = CONCURRENT infusion running at same time as another
+   Example: Rocephin infusion starts, then Zosyn infusion after = 96365, 96367
+   Example: Rocephin infusion, then same Rocephin again = 96365, 96366
+   Example: Two different drugs running at same time = 96365, 96368
+
+3. IV Push (no stop time or <=16 min duration):
+   - If NO infusion present: 96374 = first push, 96375 = different drug push, 96376 = same drug push
+   - If infusion IS present: 96375 = first different drug push, 96376 = same drug push again
+   Example: Zofran IVP + Toradol IVP (no infusion) = 96374, 96375
+   Example: Rocephin infusion running + Toradol IVP = 96365, 96375
+   Example: Morphine IVP given twice = 96374, 96376
+
+4. Hydration (saline/NS/LR/D5W/Potassium >= 31 min):
+   - If NO other drug infusion: 96360 = initial first hour, 96361 = each additional 30 min
+   - If drug infusion IS present: 96360 = initial, 96361 = additional (carrier fluid = not billable)
+   - Each 30 min increment after first hour = one 96361
+   Example: NS 1000ml x 90 min alone = 96360 + 96361 x1
+   Example: NS 1000ml x 3h alone = 96360 + 96361 x4
+   Example: NS running with Rocephin infusion = NS is carrier, not billable separately
+
+IMPORTANT RULES:
+- Only ONE 96365 per encounter (initial infusion)
+- Only ONE 96374 per encounter (initial push when no infusion)
+- Only ONE 96360 per encounter (initial hydration)
+- 96376 only if same drug given again AND at least 30 min apart
+- ✅ SHORT duration (<= 16 min) = ALWAYS IV Push (96374/96375/96376), NEVER infusion
+- ✅ Potassium, NS, Saline, LR, D5W = Hydration ONLY, never infusion
+
+Respond ONLY in this exact format:
+
+FINAL_CODES:
+96365
+96375*2
+
+REASONING:
+- one line per code"""
+
+    print("\n" + "=" * 80)
+    print("LLM IS DETERMINING FINAL CODES...")
+    print("=" * 80)
+
+    try:
+        response = requests.post(
+            "http://10.103.50.10:8000/v1/chat/completions",
+            json={
+                "model":       "openai/gpt-oss-20b",
+                "messages":    [{"role": "user", "content": prompt}],
+                "max_tokens":  4096,
+                "temperature": 0,
+                "top_p":       0.9,
+            },
+            timeout=180,
+        )
+
+        if response.status_code != 200:
+            print(f"LLM Error: {response.status_code} - {response.text[:200]}")
+            return None, None
+
+        resp_json = response.json()
+        choices   = resp_json.get('choices', [])
+
+        if not choices:
+            print("WARNING: LLM returned no choices")
+            return None, None
+
+        message = choices[0].get('message', {})
+        result  = message.get('content', '')
+
+        if not result:
+            result = message.get('reasoning', '')
+            if result:
+                print("  (using reasoning field as fallback)")
+
+        if not result:
+            finish_reason = choices[0].get('finish_reason', 'unknown')
+            print(f"WARNING: LLM returned empty content (finish_reason={finish_reason})")
+            return None, None
+
+        result = str(result).strip()
+
+        print("\nLLM RESPONSE:")
+        print("-" * 80)
+        print(result)
+        print("=" * 80)
+
+        final_codes = parse_llm_final_codes(result)
+
+        if final_codes:
+            return result, final_codes
+        else:
+            reasoning = message.get('reasoning', '')
+            if reasoning:
+                final_codes = parse_llm_final_codes(reasoning)
+                if final_codes:
+                    print("  (codes extracted from reasoning field)")
+                    return reasoning, final_codes
+
+            print("WARNING: Could not extract codes from LLM response - falling back to rule-based")
+            return result, None
+
+    except requests.exceptions.ConnectionError:
+        print("ERROR: LLM endpoint not reachable - Using rule-based codes")
+        return None, None
+    except requests.exceptions.Timeout:
+        print("WARNING: LLM timed out - Using rule-based codes")
+        return None, None
+    except Exception as e:
+        print(f"ERROR in llm_verify: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None
+
+
+def parse_llm_final_codes(llm_response: str) -> list:
+    codes = []
+
+    if not llm_response:
+        return codes
+
+    if 'FINAL_CODES:' in llm_response:
+        section = llm_response.split('FINAL_CODES:')[1]
+
+        for stop_word in ('REASONING', 'EXPLANATION', 'NOTE', 'VERIFICATION'):
+            if stop_word in section:
+                section = section.split(stop_word)[0]
+
+        for line in section.strip().split('\n'):
+            line = line.strip().lstrip('-').lstrip('*').lstrip('•').strip()
+            if not line:
+                continue
+            match = re.match(r'^(9\d{4}(?:-\d+)?)(?:\*(\d+))?', line)
+            if match:
+                code  = match.group(1)
+                units = match.group(2)
+                if units and int(units) > 1:
+                    codes.append(f"{code}*{units}")
+                else:
+                    codes.append(code)
+
+        if codes:
+            return codes
+
+    print("  (scanning full response for CPT codes)")
+    for match in re.finditer(r'\b(9\d{4}(?:-\d+)?)(?:\*(\d+))?\b', llm_response):
+        code  = match.group(1)
+        units = match.group(2)
+        entry = f"{code}*{units}" if units and int(units) > 1 else code
+        if entry not in codes:
+            codes.append(entry)
+
+    return codes
+
+
+def print_cpt_results(cpt_codes):
+    """Print rule-based results (reference only)"""
+    print("\n" + "=" * 130)
+    print("RULE-BASED CPT CODE ASSIGNMENT (Reference Only)")
+    print("=" * 130)
+    print(f"{'CODE':<12} {'UNITS':<6} {'MEDICATION':<50} {'START':<8} {'STOP':<8} {'DURATION':<10} {'DESCRIPTION'}")
+    print("-" * 130)
+    for r in cpt_codes:
+        print(
+            f"{r['code']:<12} {r['units']:<6} {r['medication']:<50} "
+            f"{r['start']:<8} {r['stop']:<8} {r.get('duration',''):<10} {r['description']}"
+        )
+    print("=" * 130)
+
+    code_summary = {}
+    for r in cpt_codes:
+        code_summary[r['code']] = code_summary.get(r['code'], 0) + r['units']
+
+    print("\nRULE-BASED SUMMARY:")
+    print("-" * 50)
+    for code, units in sorted(code_summary.items()):
+        print(f"CPT {code}: {units} unit(s)")
+
+    print("\nRULE-BASED CODES:")
+    print("-" * 50)
+    for code, units in sorted(code_summary.items()):
+        print(f"{code}*{units}" if units > 1 else code)
+
+
+def print_final_output(llm_codes, rule_codes):
+    """Print final output - LLM primary, rule-based fallback"""
+    print("\n" + "=" * 60)
+    print("FINAL CPT CODES OUTPUT")
+    print("=" * 60)
+
+    if llm_codes:
+        print("SOURCE: LLM (Primary)")
+        print("-" * 40)
+        for code in llm_codes:
+            print(code)
+        print("\n[OK] LLM codes used as final output")
+    else:
+        print("SOURCE: Rule-Based (Fallback - LLM unavailable)")
+        print("-" * 40)
+        code_summary = {}
+        for r in rule_codes:
+            code_summary[r['code']] = code_summary.get(r['code'], 0) + r['units']
+        for code, units in sorted(code_summary.items()):
+            print(f"{code}*{units}" if units > 1 else code)
+        print("\n[FALLBACK] Rule-based codes used (LLM unavailable)")
+
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    med_file = sys.argv[1] if len(sys.argv) > 1 else "med_times.txt"
+
+    coder       = CPTCoder()
+    medications = coder.parse_med_times_file(med_file)
+    print(f"Read {len(medications)} medications from {med_file}")
+
+    cpt_results, skipped_info = coder.assign_cpt_codes(medications)
+    print_cpt_results(cpt_results)
+
+    llm_response, llm_final_codes = llm_verify(medications, cpt_results, skipped_info)
+    print_final_output(llm_final_codes, cpt_results)
+
+
 {
   "id": "4a909007-d791-40e2-8f9f-a18c64dc46b8",
   "revision": 0,
