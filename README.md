@@ -144,3 +144,44 @@ root@AI-PC1:/home/famai01# ps -fp 2626283
 UID          PID    PPID  C STIME TTY          TIME CMD
 famai01  2626283       1  1 Jul16 ?        02:30:06 /home/famai01/.venv/bin/python3 /home/famai01/.venv/bin/vllm serve openai/gpt-oss-20b --host 0.0.0.0 --port 8000 --max-model-len 32768 --gpu-memory-utilization 
 root@AI-PC1:/home/famai01# 
+
+
+
+
+------------------------
+
+TAHA MOAZZAM
+AI/ML Engineer | Full-Stack Developer | Startup Founder & COO
+Cybersecurity Undergraduate (Graduating 2027)
+PROFESSIONAL SUMMARY
+Innovative CS-background AI/ML Engineer, Full-Stack Developer, and Startup COO with strong foundations in Data Structures, Algorithms, and Big O complexity analysis. Proven expertise in architecting custom PyTorch frameworks, high-precision RAG systems, and production-grade AI voice/email agents. Skilled in leveraging enterprise GPU infrastructure (NVIDIA DGX, A100, RTX 6000) for large-scale distributed computing and diagnosing complex memory leaks in high-load software pipelines.
+PROFESSIONAL EXPERIENCE
+Startup Founder & Chief Operating Officer (COO)
+ Leadership & Strategy: Spearheaded company vision, product architecture, and end-to-end technical execution across high-performance AI implementations.
+ Operations & Analytics: Developed comprehensive tracking architectures, including custom Excel progress frameworks, to monitor system performance, operational workflows, and project timelines.
+AI/ML Engineer
+ Architecture & Engineering: Designed and deployed production-grade AI models, local LLM integrations, and custom autonomous agents tailored for high-throughput enterprise applications.
+VeloxiaAI
+ Former Developer: Contributed to core AI software architecture, custom script development, and system integrations to scale generative AI capabilities.
+FAM Revtech / FNA Global
+ Management Trainee Officer (MTO) / Technical Team Member: Managed cross-functional operational workflows, integrated live databases with CRM systems, and optimized enterprise tech infrastructure.
+CORE TECHNICAL SKILLS
+ CS Foundations & Algorithms: Data Structures & Algorithms (DSA), Big O Complexity Analysis, Space/Time Optimization, Memory Management.
+ AI, ML & NLP: PyTorch (Custom Builds), RAG Systems, Rule Matching, LLM Validation, Fine-tuning, Local LLM Deployment (LM Studio, LLaMA), Deepfake Detection, Autonomous Voice & Email Agents.
+ High-Performance Computing: NVIDIA DGX Clusters, NVIDIA A100, RTX 6000 PRO, RTX 5090 (32GB), Apache Spark, Thermal/Hardware Optimization (ThrottleStop, Peltier Systems).
+ Backend & Systems Development: Python, FastAPI, RESTful APIs, Webhooks Automation, Database & CRM Integration, Telecommunications/Call Forwarding Infrastructure.
+ Frontend & Web Development: HTML/CSS/JavaScript, Three.js (3D Interactive Storytelling), UI/UX Architecture.
+ Optimization & Debugging: Memory Leak Remediation, Profiling & Resource Clogging Optimization, Real-time System Analytics.
+KEY PROJECTS & TECHNICAL ACHIEVEMENTS
+ Custom PyTorch Engine for DGX & Spark: Engineered and built a customized version of the PyTorch framework specifically optimized for distributed computing environments on NVIDIA DGX clusters and Apache Spark.
+ High-Precision RAG Systems: Developed advanced Retrieval-Augmented Generation (RAG) models featuring strict LLM validations and rule matching; curated specialized prediction datasets achieving over 85% Precision, Recall, and F1 Scores.
+ Autonomous AI Voice & Email Calling Agent: Built and deployed a production-grade voice agent using Vapi and cloud hosting, connected directly to an automated emailing agent to seamlessly trigger real-time email workflows during or post-calls. Configured physical SIM integration via cloud call forwarding.
+ Automated AI Storyteller & Pipeline Optimization: Architected an end-to-end tool generating AI images, dynamic scripting, and 60-second narrative videos. Diagnosed and permanently fixed complex memory clogging/leak issues during high-load processing.
+ Deepfake Detection System: Designed a specialized computer vision and AI model capable of identifying manipulated media and deepfakes, aligning advanced AI with Cybersecurity principles.
+ Automated Medical Billing System: Developed core modules for automated medical billing workflows integrated with ICD (International Classification of Diseases) and CPT (Current Procedural Terminology) codes.
+ Interactive 3D Web Experience: Built an immersive, storytelling web application using Three.js integrated with a responsive frontend and FastAPI backend.
+ Software Applications & Utilities: Developed practical applications including the 'Move Ease' lodging app, 'Bus Tokeniser', and a custom GIF Maker utility tool.
+EDUCATION
+Bachelor’s Degree in Cybersecurity (CS Background)
+ Expected Completion: 2027
+ Core CS & Security Domains: Data Structures & Algorithms, Network Behavior Analysis, Digital Forensics, Shell Scripting, Systems Security.
